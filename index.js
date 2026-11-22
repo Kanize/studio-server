@@ -4,16 +4,24 @@ import { MongoClient, ObjectId } from "mongodb";
 import "dotenv/config";
 import cors from "cors";
 
+// --------------------------------------------------
+// APP CONFIGURATION
+// --------------------------------------------------
+
 const app = express();
 const PORT = process.env.PORT || 8000;
 
 const FRONTEND_URL = (
   process.env.FRONTEND_URL || "http://localhost:3000"
-).trim().replace(/\/+$/, "");
+)
+  .trim()
+  .replace(/\/+$/, "");
 
 const BETTER_AUTH_URL = (
   process.env.BETTER_AUTH_URL || "http://localhost:3000"
-).trim().replace(/\/+$/, "");
+)
+  .trim()
+  .replace(/\/+$/, "");
 
 if (!process.env.MONGODB_URI) {
   throw new Error("MONGODB_URI is missing from environment variables.");
@@ -45,6 +53,7 @@ await client.connect();
 console.log("MongoDB connected successfully!");
 
 const db = client.db("studio-space");
+
 const studiosCollection = db.collection("studios");
 const bookingsCollection = db.collection("bookings");
 
@@ -99,7 +108,7 @@ async function authenticateUser(req, res, next) {
       email: sessionData.user.email.trim().toLowerCase(),
     };
 
-    next();
+    return next();
   } catch (error) {
     console.error("Authentication Error:", error);
 
@@ -122,7 +131,10 @@ function isValidObjectId(id) {
 }
 
 function isValidDate(date) {
-  if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+  if (
+    typeof date !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(date)
+  ) {
     return false;
   }
 
@@ -143,9 +155,12 @@ function isValidTime(time) {
 
 function calculateEndTime(startTime, hours) {
   const [hour, minute] = startTime.split(":").map(Number);
+
   const totalMinutes = hour * 60 + minute + hours * 60;
 
-  if (totalMinutes > 24 * 60) return null;
+  if (totalMinutes > 24 * 60) {
+    return null;
+  }
 
   const endHour = Math.floor(totalMinutes / 60);
   const endMinute = totalMinutes % 60;
@@ -155,6 +170,7 @@ function calculateEndTime(startTime, hours) {
   ).padStart(2, "0")}`;
 }
 
+// Only these fields can be updated in a studio document.
 const allowedStudioFields = [
   "title",
   "category",
@@ -168,6 +184,21 @@ const allowedStudioFields = [
   "overview",
 ];
 
+// Ownership filter:
+// New documents use hostId.
+// Legacy documents without hostId use hostEmail.
+function getStudioOwnerFilter(user) {
+  return {
+    $or: [
+      { hostId: user.id },
+      {
+        hostId: { $exists: false },
+        hostEmail: user.email,
+      },
+    ],
+  };
+}
+
 function sendServerError(res, message) {
   return res.status(500).json({
     success: false,
@@ -180,7 +211,7 @@ function sendServerError(res, message) {
 // --------------------------------------------------
 
 app.get("/", (req, res) => {
-  res.json({
+  return res.status(200).json({
     success: true,
     message: "StudioSpace server is running!",
   });
@@ -205,6 +236,7 @@ app.post("/add-studio", authenticateUser, async (req, res) => {
       overview,
     } = req.body;
 
+    // Required text validation
     if (
       typeof title !== "string" ||
       !title.trim() ||
@@ -223,6 +255,7 @@ app.post("/add-studio", authenticateUser, async (req, res) => {
       });
     }
 
+    // Numeric validation
     const hourlyRateNumber = Number(hourlyRate);
     const depositNumber = Number(securityDeposit);
     const capacityNumber = Number(maxCapacity);
@@ -241,9 +274,13 @@ app.post("/add-studio", authenticateUser, async (req, res) => {
       });
     }
 
+    // Amenities validation
     if (
       amenities !== undefined &&
-      !Array.isArray(amenities)
+      (
+        !Array.isArray(amenities) ||
+        !amenities.every((item) => typeof item === "string")
+      )
     ) {
       return res.status(400).json({
         success: false,
@@ -251,9 +288,13 @@ app.post("/add-studio", authenticateUser, async (req, res) => {
       });
     }
 
+    // Images validation
     if (
       images !== undefined &&
-      !Array.isArray(images)
+      (
+        !Array.isArray(images) ||
+        !images.every((item) => typeof item === "string")
+      )
     ) {
       return res.status(400).json({
         success: false,
@@ -261,25 +302,43 @@ app.post("/add-studio", authenticateUser, async (req, res) => {
       });
     }
 
+    if (
+      imageUrl !== undefined &&
+      typeof imageUrl !== "string"
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid image URL.",
+      });
+    }
+
     const newStudio = {
       title: title.trim(),
       category: category.trim(),
+
       hourlyRate: hourlyRateNumber,
       securityDeposit: depositNumber,
       maxCapacity: capacityNumber,
+
       location: location.trim(),
-      imageUrl: typeof imageUrl === "string" ? imageUrl.trim() : "",
+
+      imageUrl: typeof imageUrl === "string"
+        ? imageUrl.trim()
+        : "",
+
       images: Array.isArray(images) ? images : [],
       amenities: Array.isArray(amenities) ? amenities : [],
+
       overview: overview.trim(),
 
-      // Host identity always comes from verified Better Auth session.
+      // Host identity comes from verified Better Auth session.
       hostId: req.user.id,
       hostName: req.user.name,
       hostEmail: req.user.email,
 
       rating: 0,
       status: "active",
+
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -309,7 +368,7 @@ app.get("/studios", async (req, res) => {
       .sort({ createdAt: -1 })
       .toArray();
 
-    return res.json(studios);
+    return res.status(200).json(studios);
   } catch (error) {
     console.error("Get Studios Error:", error);
 
@@ -324,9 +383,7 @@ app.get("/studios", async (req, res) => {
 app.get("/my-listings", authenticateUser, async (req, res) => {
   try {
     const studios = await studiosCollection
-      .find({
-        hostEmail: req.user.email,
-      })
+      .find(getStudioOwnerFilter(req.user))
       .sort({ createdAt: -1 })
       .toArray();
 
@@ -360,7 +417,7 @@ app.get("/featured-studios", async (req, res) => {
       .limit(6)
       .toArray();
 
-    return res.json({
+    return res.status(200).json({
       success: true,
       studios,
     });
@@ -400,7 +457,10 @@ app.get("/studios/:id", async (req, res) => {
       });
     }
 
-    return res.json(studio);
+    return res.status(200).json({
+      success: true,
+      studio,
+    });
   } catch (error) {
     console.error("Get Studio Error:", error);
 
@@ -425,6 +485,7 @@ app.patch("/studios/:id", authenticateUser, async (req, res) => {
 
     const updates = {};
 
+    // Allow only approved fields.
     for (const field of allowedStudioFields) {
       if (req.body[field] !== undefined) {
         updates[field] = req.body[field];
@@ -438,6 +499,7 @@ app.patch("/studios/:id", authenticateUser, async (req, res) => {
       });
     }
 
+    // Title validation
     if (updates.title !== undefined) {
       if (
         typeof updates.title !== "string" ||
@@ -453,6 +515,7 @@ app.patch("/studios/:id", authenticateUser, async (req, res) => {
       updates.title = updates.title.trim();
     }
 
+    // Text field validation
     for (const field of ["category", "location", "overview"]) {
       if (updates[field] !== undefined) {
         if (
@@ -469,6 +532,7 @@ app.patch("/studios/:id", authenticateUser, async (req, res) => {
       }
     }
 
+    // Image URL validation
     if (updates.imageUrl !== undefined) {
       if (typeof updates.imageUrl !== "string") {
         return res.status(400).json({
@@ -480,6 +544,7 @@ app.patch("/studios/:id", authenticateUser, async (req, res) => {
       updates.imageUrl = updates.imageUrl.trim();
     }
 
+    // Hourly rate validation
     if (updates.hourlyRate !== undefined) {
       updates.hourlyRate = Number(updates.hourlyRate);
 
@@ -494,6 +559,7 @@ app.patch("/studios/:id", authenticateUser, async (req, res) => {
       }
     }
 
+    // Security deposit validation
     if (updates.securityDeposit !== undefined) {
       updates.securityDeposit = Number(updates.securityDeposit);
 
@@ -508,6 +574,7 @@ app.patch("/studios/:id", authenticateUser, async (req, res) => {
       }
     }
 
+    // Maximum capacity validation
     if (updates.maxCapacity !== undefined) {
       updates.maxCapacity = Number(updates.maxCapacity);
 
@@ -522,9 +589,15 @@ app.patch("/studios/:id", authenticateUser, async (req, res) => {
       }
     }
 
+    // Amenities validation
     if (
       updates.amenities !== undefined &&
-      !Array.isArray(updates.amenities)
+      (
+        !Array.isArray(updates.amenities) ||
+        !updates.amenities.every(
+          (item) => typeof item === "string"
+        )
+      )
     ) {
       return res.status(400).json({
         success: false,
@@ -532,9 +605,15 @@ app.patch("/studios/:id", authenticateUser, async (req, res) => {
       });
     }
 
+    // Images validation
     if (
       updates.images !== undefined &&
-      !Array.isArray(updates.images)
+      (
+        !Array.isArray(updates.images) ||
+        !updates.images.every(
+          (item) => typeof item === "string"
+        )
+      )
     ) {
       return res.status(400).json({
         success: false,
@@ -546,7 +625,7 @@ app.patch("/studios/:id", authenticateUser, async (req, res) => {
     const result = await studiosCollection.updateOne(
       {
         _id: new ObjectId(id),
-        hostEmail: req.user.email,
+        ...getStudioOwnerFilter(req.user),
       },
       {
         $set: {
@@ -559,11 +638,11 @@ app.patch("/studios/:id", authenticateUser, async (req, res) => {
     if (result.matchedCount === 0) {
       return res.status(404).json({
         success: false,
-        message: "Studio not found or you are not its owner.",
+        message: "Studio not found or you are not authorized to update it.",
       });
     }
 
-    return res.json({
+    return res.status(200).json({
       success: true,
       message: "Studio updated successfully!",
     });
@@ -592,17 +671,17 @@ app.delete("/studios/:id", authenticateUser, async (req, res) => {
     // Only the authenticated owner can delete this studio.
     const result = await studiosCollection.deleteOne({
       _id: new ObjectId(id),
-      hostEmail: req.user.email,
+      ...getStudioOwnerFilter(req.user),
     });
 
     if (result.deletedCount === 0) {
       return res.status(404).json({
         success: false,
-        message: "Studio not found or you are not its owner.",
+        message: "Studio not found or you are not authorized to delete it.",
       });
     }
 
-    return res.json({
+    return res.status(200).json({
       success: true,
       message: "Studio deleted successfully!",
     });
@@ -619,10 +698,16 @@ app.delete("/studios/:id", authenticateUser, async (req, res) => {
 
 app.post("/bookings", authenticateUser, async (req, res) => {
   try {
-    const { studioId, bookingDate, startTime, hours } = req.body;
+    const {
+      studioId,
+      bookingDate,
+      startTime,
+      hours,
+    } = req.body;
 
     const duration = Number(hours);
 
+    // Validate booking details
     if (
       !isValidObjectId(studioId) ||
       !isValidDate(bookingDate) ||
@@ -646,6 +731,7 @@ app.post("/bookings", authenticateUser, async (req, res) => {
       });
     }
 
+    // Find active studio
     const studio = await studiosCollection.findOne({
       _id: new ObjectId(studioId),
       status: "active",
@@ -658,7 +744,9 @@ app.post("/bookings", authenticateUser, async (req, res) => {
       });
     }
 
+    // Prevent owner from booking their own studio.
     if (
+      studio.hostId === req.user.id ||
       studio.hostEmail?.trim().toLowerCase() === req.user.email
     ) {
       return res.status(403).json({
@@ -671,9 +759,15 @@ app.post("/bookings", authenticateUser, async (req, res) => {
     const conflictingBooking = await bookingsCollection.findOne({
       studioId: new ObjectId(studioId),
       bookingDate,
-      status: { $in: ["Pending", "Confirmed"] },
-      startTime: { $lt: endTime },
-      endTime: { $gt: startTime },
+      status: {
+        $in: ["Pending", "Confirmed"],
+      },
+      startTime: {
+        $lt: endTime,
+      },
+      endTime: {
+        $gt: startTime,
+      },
     });
 
     if (conflictingBooking) {
@@ -683,15 +777,26 @@ app.post("/bookings", authenticateUser, async (req, res) => {
       });
     }
 
-    // Price is calculated on the server, not by the frontend.
+    // Calculate all prices on the server.
     const hourlyRate = Number(studio.hourlyRate);
     const securityDeposit = Number(studio.securityDeposit) || 0;
+
+    if (
+      !Number.isFinite(hourlyRate) ||
+      hourlyRate <= 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Studio pricing is invalid.",
+      });
+    }
 
     const subtotal = hourlyRate * duration;
     const totalPrice = subtotal + securityDeposit;
 
     const newBooking = {
       studioId: new ObjectId(studioId),
+
       studioName: studio.title,
       studioImage: studio.imageUrl || "",
       studioLocation: studio.location || "",
@@ -700,6 +805,7 @@ app.post("/bookings", authenticateUser, async (req, res) => {
       userName: req.user.name,
       userEmail: req.user.email,
 
+      hostId: studio.hostId || "",
       hostEmail: studio.hostEmail || "",
 
       bookingDate,
@@ -744,12 +850,12 @@ app.get("/my-bookings", authenticateUser, async (req, res) => {
   try {
     const bookings = await bookingsCollection
       .find({
-        userEmail: req.user.email,
+        userId: req.user.id,
       })
       .sort({ createdAt: -1 })
       .toArray();
 
-    return res.json({
+    return res.status(200).json({
       success: true,
       bookings,
     });
@@ -781,7 +887,7 @@ app.patch(
       const result = await bookingsCollection.updateOne(
         {
           _id: new ObjectId(id),
-          userEmail: req.user.email,
+          userId: req.user.id,
           status: "Pending",
         },
         {
@@ -800,7 +906,7 @@ app.patch(
         });
       }
 
-      return res.json({
+      return res.status(200).json({
         success: true,
         message: "Booking cancelled successfully!",
       });
@@ -819,3 +925,22 @@ app.patch(
 app.listen(PORT, () => {
   console.log(`StudioSpace server running on port ${PORT}`);
 });
+
+// --------------------------------------------------
+// GRACEFUL SHUTDOWN
+// --------------------------------------------------
+
+async function shutdown() {
+  console.log("Shutting down StudioSpace server...");
+
+  try {
+    await client.close();
+    process.exit(0);
+  } catch (error) {
+    console.error("MongoDB shutdown error:", error);
+    process.exit(1);
+  }
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
