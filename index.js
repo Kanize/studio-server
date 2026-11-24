@@ -364,7 +364,12 @@ app.post("/add-studio", authenticateUser, async (req, res) => {
 app.get("/studios", async (req, res) => {
   try {
     const studios = await studiosCollection
-      .find({ status: "active" })
+      .find({
+        $or: [
+          { status: "active" },
+          { status: { $exists: false } },
+        ],
+      })
       .sort({ createdAt: -1 })
       .toArray();
 
@@ -408,7 +413,12 @@ app.get("/my-listings", authenticateUser, async (req, res) => {
 app.get("/featured-studios", async (req, res) => {
   try {
     const studios = await studiosCollection
-      .find({ status: "active" })
+      .find({
+        $or: [
+          { status: "active" },
+          { status: { $exists: false } },
+        ],
+      })
       .sort({
         rating: -1,
         createdAt: -1,
@@ -696,6 +706,7 @@ app.delete("/studios/:id", authenticateUser, async (req, res) => {
 // CREATE BOOKING
 // --------------------------------------------------
 
+
 app.post("/bookings", authenticateUser, async (req, res) => {
   try {
     const {
@@ -722,6 +733,7 @@ app.post("/bookings", authenticateUser, async (req, res) => {
       });
     }
 
+    // Calculate booking end time
     const endTime = calculateEndTime(startTime, duration);
 
     if (!endTime || endTime === startTime) {
@@ -731,10 +743,13 @@ app.post("/bookings", authenticateUser, async (req, res) => {
       });
     }
 
-    // Find active studio
+    // Find studio (supports both new and legacy studio documents)
     const studio = await studiosCollection.findOne({
       _id: new ObjectId(studioId),
-      status: "active",
+      $or: [
+        { status: "active" },
+        { status: { $exists: false } },
+      ],
     });
 
     if (!studio) {
@@ -744,10 +759,13 @@ app.post("/bookings", authenticateUser, async (req, res) => {
       });
     }
 
-    // Prevent owner from booking their own studio.
+    // Prevent owner from booking their own studio
     if (
       studio.hostId === req.user.id ||
-      studio.hostEmail?.trim().toLowerCase() === req.user.email
+      (
+        typeof studio.hostEmail === "string" &&
+        studio.hostEmail.trim().toLowerCase() === req.user.email
+      )
     ) {
       return res.status(403).json({
         success: false,
@@ -755,7 +773,7 @@ app.post("/bookings", authenticateUser, async (req, res) => {
       });
     }
 
-    // Check overlapping Pending or Confirmed bookings.
+    // Check overlapping Pending or Confirmed bookings
     const conflictingBooking = await bookingsCollection.findOne({
       studioId: new ObjectId(studioId),
       bookingDate,
@@ -777,13 +795,15 @@ app.post("/bookings", authenticateUser, async (req, res) => {
       });
     }
 
-    // Calculate all prices on the server.
+    // Calculate price on the server
     const hourlyRate = Number(studio.hourlyRate);
     const securityDeposit = Number(studio.securityDeposit) || 0;
 
     if (
       !Number.isFinite(hourlyRate) ||
-      hourlyRate <= 0
+      hourlyRate <= 0 ||
+      !Number.isFinite(securityDeposit) ||
+      securityDeposit < 0
     ) {
       return res.status(400).json({
         success: false,
@@ -794,6 +814,7 @@ app.post("/bookings", authenticateUser, async (req, res) => {
     const subtotal = hourlyRate * duration;
     const totalPrice = subtotal + securityDeposit;
 
+    // Create booking document
     const newBooking = {
       studioId: new ObjectId(studioId),
 
@@ -835,10 +856,14 @@ app.post("/bookings", authenticateUser, async (req, res) => {
         _id: result.insertedId,
       },
     });
+
   } catch (error) {
     console.error("Create Booking Error:", error);
 
-    return sendServerError(res, "Failed to create booking.");
+    return sendServerError(
+      res,
+      "Failed to create booking."
+    );
   }
 });
 
@@ -884,7 +909,7 @@ app.patch(
         });
       }
 
-      const result = await bookingsCollection.updateOne(
+      const booking = await bookingsCollection.findOneAndUpdate(
         {
           _id: new ObjectId(id),
           userId: req.user.id,
@@ -895,10 +920,13 @@ app.patch(
             status: "Cancelled",
             updatedAt: new Date(),
           },
+        },
+        {
+          returnDocument: "after",
         }
       );
 
-      if (result.matchedCount === 0) {
+      if (!booking) {
         return res.status(404).json({
           success: false,
           message:
@@ -909,6 +937,7 @@ app.patch(
       return res.status(200).json({
         success: true,
         message: "Booking cancelled successfully!",
+        booking: booking,
       });
     } catch (error) {
       console.error("Cancel Booking Error:", error);
